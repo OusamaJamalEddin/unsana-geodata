@@ -1,0 +1,224 @@
+geo.db format, version 1 (2026-10-03; bundled since 2026-10-06)
+==============================================================
+
+SQLite file. PRAGMA user_version = 1, page_size 4096, vacuumed. No timestamps.
+Built by build_geo.py; two builds from the same sources give the same bytes.
+
+Tables
+------
+CREATE TABLE areas (
+  area_id INTEGER NOT NULL PRIMARY KEY,
+  layer INTEGER NOT NULL CHECK (layer IN (0, 1, 2, 3)),
+  code TEXT,
+  source_code TEXT NOT NULL,
+  min_lat INTEGER NOT NULL, min_lon INTEGER NOT NULL,
+  max_lat INTEGER NOT NULL, max_lon INTEGER NOT NULL,
+  rings BLOB NOT NULL);
+CREATE TABLE reviewed_areas (
+  code TEXT NOT NULL PRIMARY KEY, name_en TEXT NOT NULL, rule TEXT NOT NULL,
+  region_id TEXT, reference TEXT NOT NULL) WITHOUT ROWID;
+CREATE TABLE dataset_info (key TEXT NOT NULL PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
+CREATE INDEX areas_by_box ON areas (min_lat, max_lat, min_lon, max_lon);
+
+One areas row is one polygon part: one outer ring with its holes. A
+multipolygon is several rows with the same layer and code.
+
+Rows are sorted by layer, code (NULL last), source_code, min_lat, min_lon,
+max_lat, max_lon, then the rings bytes. area_id runs from 1 in that order.
+
+Layers
+------
+0  country    code: displayed ISO 3166-1 alpha-2 code, or NULL for an uncoded
+              disputed polygon (unresolved). source_code: CGAZ shapeGroup
+              (ISO3), or the CGAZ shapeName for a polygon without an ISO code.
+              ISR and the uncoded West Bank, Gaza Strip and No Man's Land
+              polygons carry code PS. No row carries IL.
+1  territory  code: ISO2 of a dependent territory. source_code: the Natural
+              Earth ADM0_A3 of the feature the polygon was taken from. A hit
+              here overrides the layer 0 code.
+2  timezone   code: IANA zone id. Zones overlap on purpose in some places, so
+              a point can lie in rows of two different codes.
+              source_code: the same zone id for a row of the boundary source,
+              or "reviewed:" and an area id for a reviewed timezone area. Such
+              an area adds its zone as one more candidate where the reviewed
+              city data keeps another clock than the boundary source gives. It
+              takes nothing away. A reader treats both kinds of row alike.
+3  reviewed   code and source_code: reviewed area id, a key of reviewed_areas.
+
+Coordinates
+-----------
+Integers in units of 1e-5 degree: q(v) = floor(v * 100000 + 0.5).
+min_lat, min_lon, max_lat, max_lon bound all rings of the row.
+
+rings blob
+----------
+Unsigned LEB128 varints.
+  ring count
+  for each ring: point count N, then N points
+    first point:  zigzag(lon), zigzag(lat), absolute
+    other points: zigzag(dlon), zigzag(dlat), relative to the previous point
+zigzag(n) = (n << 1) ^ (n >> 63). Ring 0 is the outer ring; the others are
+holes. A ring is not closed explicitly: the first point is not repeated.
+Consecutive equal points were removed after rounding. A ring left with fewer
+than 3 points was dropped; a polygon whose outer ring was dropped was dropped.
+dataset_info counts both per layer.
+
+The builder writes outer rings counterclockwise and holes clockwise, starts
+each ring at its smallest (lon, lat) point and sorts the holes. The lookup
+does not depend on any of this and a reader must not rely on it.
+
+Lookup
+------
+1. x = q(lon), y = q(lat).
+2. Candidate rows: min_lat <= y <= max_lat and min_lon <= x <= max_lon.
+3. A row contains the point when the number of crossed edges over ALL its
+   rings is odd. Each ring has an edge from every point to the next and from
+   its last point to its first. An edge (x1, y1)-(x2, y2) is crossed when
+       (y1 > y) != (y2 > y)
+   and
+       (x - x1) * (y2 - y1) < (x2 - x1) * (y - y1)    if y2 > y1
+       (x - x1) * (y2 - y1) > (x2 - x1) * (y - y1)    otherwise.
+   Integers only. Products stay below 2^51, so 64-bit integers (and
+   JavaScript numbers) hold them exactly.
+4. The answer per layer is the set of distinct codes of the containing rows.
+
+Consequences of the rule
+- A point on a border between two rows of one layer belongs to exactly one of
+  them: the row on the right of a vertical edge, the row above a horizontal one.
+- Longitude 180 exactly and latitude 90 exactly lie on the outer edge and are
+  in no row. A reader should map longitude 180 to -180.
+- Layer 2 tiles the whole range: build_geo.py proves that every integer point
+  with -180 <= lon < 180 and -90 <= lat < 90 lies in at least one timezone row
+  of the boundary source. The reviewed timezone areas lie on top of that.
+
+dataset_info keys
+-----------------
+format_version, coordinate_units_per_degree, simplification_tolerance_degrees,
+simplification_method, row_order, builder.*, source.<name>.{name, version,
+sha256, license, path}, layer.<n>.{rows, vertices, dropped_rings,
+dropped_polygons}, layer.1.codes, layer.2.shared_pieces (the zone pairs that
+overlap), layer.2.reviewed_areas (the reviewed timezone areas, each with the
+zone it adds), layer.2.shared_vertices_added, and related build facts.
+
+city_boundaries.db format, version 2 (2026-10-10)
+================================================
+
+SQLite file. PRAGMA user_version = 2, page_size 4096, vacuumed. No timestamps.
+Built by build_city_boundaries.py; two builds from the same inputs give the
+same bytes. It is a file of its own: nothing in geo.db depends on it, and the
+country, territory and timezone rules do not read it.
+
+History. Version 1 (2026-10-09) held the urban centers of the GHS Urban
+Centre Database, which are built-up areas. On 2026-10-10 the contents were
+replaced by administrative areas of the divisions theme of Overture Maps, in
+the same layout. Version 2, the same day, added the table area_kinds; the
+table city_areas and its rows did not change.
+
+Tables
+------
+CREATE TABLE city_areas (
+  area_id INTEGER NOT NULL PRIMARY KEY,
+  city_id INTEGER NOT NULL CHECK (city_id > 0),
+  source_code TEXT NOT NULL,
+  min_lat INTEGER NOT NULL, min_lon INTEGER NOT NULL,
+  max_lat INTEGER NOT NULL, max_lon INTEGER NOT NULL,
+  rings BLOB NOT NULL);
+CREATE INDEX city_areas_by_box ON city_areas (min_lat, max_lat, min_lon, max_lon);
+CREATE TABLE area_kinds (city_id INTEGER NOT NULL PRIMARY KEY, kind TEXT NOT NULL) WITHOUT ROWID;
+CREATE TABLE dataset_info (key TEXT NOT NULL PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
+
+One city_areas row is one polygon part of one administrative area of the
+source: one outer ring with its holes. city_id is the city_id of cities.db
+the area stands for. source_code is the source's own id of the area (the id of
+the division_area feature), kept for provenance and never displayed. An area
+of several parts has several rows with the same city_id and source_code. A
+city has one area, and an area has one city.
+
+Rows are sorted by the area of the unit in square kilometers, the smallest
+unit first, then source_code, min_lat, min_lon, max_lat, max_lon and the rings
+bytes. area_id runs from 1 in that order. The area of the unit is measured on
+the published outline, on the WGS84 ellipsoid; it is not stored.
+
+Coordinates and the rings blob are those of geo.db, above. The polygons are
+the land areas of the source in WGS84, simplified by 0.001 degree (about
+110 m), each outline on its own, and rounded. An outline is kept as published
+where the simplified one would not hold the city it stands for. Nothing is
+repaired, merged or redrawn. Because each outline is simplified on its own,
+neighbors can overlap or leave a gap by up to that tolerance.
+
+Lookup
+------
+The city of a point is the city_id of the first row, by area_id, whose
+polygon contains it, tested as in geo.db. A point in no row is in no city:
+no nearest city is looked for. Areas can lie inside one another, a town
+inside the outline of a larger one; the order of the rows makes the smallest
+area answer.
+
+The areas are land. A point on the water of a harbor, a creek or the open
+sea is in no row.
+
+For a GPS fix the reader asks five points: the fix and the points one
+accuracy away to the north, east, south and west. One answer means the fix
+can tell its city; several mean it straddles a boundary.
+
+What an area is named as
+------------------------
+An accepted area is not always the outline of the city itself. area_kinds
+lists the cities whose area is a larger unit that is named as such, with the
+word for the unit in kind. The only word is "governorate", for the Saudi
+governorates. A city without a row is named as itself.
+
+It concerns the label only. A reader that shows the name of a GPS location
+inside such an area says "Jeddah Governorate", not "Jeddah". The city_id is
+still the identity of the place. The file gives no center for an area, and a
+reader must not take one: the position of a GPS location is the GPS position.
+A reader refuses a kind it does not know.
+
+Which area stands for a city
+----------------------------
+Decided once, in build_city_boundaries.py, by the rules of
+city_area_rules.py, for each bundled city of min_population people or more:
+  1. Only the levels locality, localadmin, county and region of the source.
+  2. The area must hold the city's position and carry a name of the city:
+     equal without case, marks, spaces and punctuation, or equal once the
+     word for the kind of unit is removed from the name of the area.
+  3. The smallest such area is taken.
+  4. A locality is the outline of the place itself and is accepted. A unit
+     above it is accepted only when the source lists no other city or town
+     inside it.
+  5. One country rule: in Saudi Arabia a town of fewer than 50,000 people, or
+     of unknown size, inside a governorate (level county) does not refuse
+     it. Another city, or a larger town, still does.
+  6. An accepted area inside a larger accepted area is left out, unless it
+     is the locality of a place the source classes as a city or town.
+  7. An accepted Saudi governorate is recorded in area_kinds, so that it is
+     named as a governorate.
+An area several cities name is labeled with the most populous. A city
+without an accepted area has no row.
+
+No level means "city" in every country. An accepted area is an administrative
+territory: it can be much larger than the built-up city, and the villages in
+it take the name of the city.
+
+dataset_info keys
+-----------------
+format_version, coordinate_units_per_degree, levels, min_population,
+selection_rule, country_rules, country_rules_meaning,
+simplification_tolerance_degrees, simplification_method, row_order,
+builder.*, source.overture_divisions.{name, version, sha256, license, files},
+source.cities.{name, version, sha256, path}, areas.with_the_name_of_a_city,
+areas.kept, areas.kept.<level>, areas.kept_as_published,
+areas.kept_with_tolerated_towns, area_kinds, area_kinds_meaning,
+areas.named.<kind>, rows, vertices, cities, dropped_rings,
+dropped_polygons, cities.<outcome> for the outcomes identified,
+no_area_of_its_name, area_holds_another_city_or_town,
+area_named_by_a_larger_city and part_of_a_larger_city, and
+identification.population_<n>.{cities, inside, identified}: the bundled
+cities of at least n people, how many of them lie inside an area of the file,
+and how many the file identifies as themselves. A city inside the area of
+another city is inside and not identified.
+
+source.overture_divisions.sha256 is one checksum for the nine pinned copies
+of the source: the SHA-256 of their lock keys and checksums, one "key
+checksum" line each, in key order. source.overture_divisions.files lists
+them.

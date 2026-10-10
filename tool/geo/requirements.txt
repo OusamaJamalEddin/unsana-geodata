@@ -1,0 +1,8 @@
+# The versions build_geo.py and build_city_boundaries.py were run with. Another GEOS
+# version may simplify differently, and another DuckDB version may write a copy of an
+# Overture file with other bytes than the pinned ones. fetch_geo_sources.py needs the
+# standard library only.
+numpy==2.5.3
+shapely==2.1.2
+pyshp==3.1.6
+duckdb==1.5.6

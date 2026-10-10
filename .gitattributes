@@ -1,0 +1,4 @@
+# Every file is stored exactly as built: no line ending is converted.
+* -text
+# The datasets are stored with Git LFS.
+assets/data/*.db filter=lfs diff=lfs merge=lfs -text
